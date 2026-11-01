@@ -6,7 +6,7 @@ import json
 import os
 import re
 
-# --- 1. CONFIGURACIÓN DE CLIENTES SEGUROS ---
+# --- 1. CONFIGURACIÓN DE CLIENTES ---
 def get_secret(key):
     return st.secrets.get(key, "").strip().replace('"', '').replace("'", "")
 
@@ -16,45 +16,23 @@ def get_google_client():
     return genai.Client(api_key=key) if key else None
 
 @st.cache_resource
-def get_openrouter_client():
-    key = get_secret("OPENROUTER_API_KEY")
-    return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=key) if key else None
-
-@st.cache_resource
-def get_groq_client():
-    key = get_secret("GROQ_API_KEY")
-    return OpenAI(base_url="https://api.groq.com/openai/v1", api_key=key) if key else None
-
-@st.cache_resource
-def get_mistral_client():
-    key = get_secret("MISTRAL_API_KEY")
-    return OpenAI(base_url="https://api.mistral.ai/v1", api_key=key) if key else None
-
-@st.cache_resource
-def get_huggingface_client():
-    key = get_secret("HUGGINGFACE_API_KEY")
-    return OpenAI(base_url="https://api-inference.huggingface.co/v1", api_key=key) if key else None
+def get_openai_client(base_url, key_name):
+    key = get_secret(key_name)
+    return OpenAI(base_url=base_url, api_key=key) if key else None
 
 google_client = get_google_client()
-openrouter_client = get_openrouter_client()
-groq_client = get_groq_client()
-mistral_client = get_mistral_client()
-hf_client = get_huggingface_client()
+openrouter_client = get_openai_client("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY")
+mistral_client = get_openai_client("https://api.mistral.ai/v1", "MISTRAL_API_KEY")
+groq_client = get_openai_client("https://api.groq.com/openai/v1", "GROQ_API_KEY")
+hf_client = get_openai_client("https://api-inference.huggingface.co/v1", "HUGGINGFACE_API_KEY")
 
 # --- 2. SISTEMA DE MEMORIA ---
 MEMORY_FILE = "memoria_arquimedes.json"
 
 def cargar_memoria():
     if not os.path.exists(MEMORY_FILE):
-        memoria_inicial = {
-            "reglas": [
-                "Hablar en español sencillo.",
-                "Coordinar la creación de videos educativos.",
-                "Enfocarse en la historia de Tesla vs Edison."
-            ]
-        }
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(memoria_inicial, f, ensure_ascii=False, indent=4)
+            json.dump({"reglas": ["Hablar en español sencillo.", "Enfocarse en Tesla vs Edison."]}, f, ensure_ascii=False, indent=4)
     with open(MEMORY_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -65,145 +43,144 @@ def guardar_memoria(nueva_regla):
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(memoria, f, ensure_ascii=False, indent=4)
 
-# --- 3. INTERFAZ GRÁFICA ---
+# --- 3. INTERFAZ GRÁFICA ESTILO CHATGPT ---
+st.set_page_config(page_title="Arquímedes", layout="wide")
 st.title("🏛️ La Casa de Arquímedes")
 
-st.sidebar.header("⚙️ Configuración")
-modelo_principal = st.sidebar.selectbox(
-    "Modelo de IA Principal:",
-    ["gemini-3.8-flash", "gemini-1.5-flash"]
-)
-modelo_respaldo = "gemini-1.5-flash" if modelo_principal == "gemini-3.8-flash" else "gemini-3.8-flash"
+# --- SIDEBAR: MÚLTIPLES CHATS Y SELECTOR DE IA ---
+with st.sidebar:
+    st.header("💬 Tus Chats")
+    
+    # Inicializar diccionario de chats
+    if "mis_chats" not in st.session_state:
+        st.session_state.mis_chats = {"Chat Principal": []}
+        st.session_state.chat_actual = "Chat Principal"
 
-memoria_actual = cargar_memoria()
-st.sidebar.subheader("🧠 Memoria de Arquímedes")
-for regla in memoria_actual["reglas"]:
-    st.sidebar.write(f"- {regla}")
+    # Botón para crear nuevo chat
+    if st.button("➕ Nuevo Chat"):
+        nuevo_nombre = f"Chat {len(st.session_state.mis_chats) + 1}"
+        st.session_state.mis_chats[nuevo_nombre] = []
+        st.session_state.chat_actual = nuevo_nombre
+        st.rerun()
 
-# --- 4. LÓGICA DEL CHAT ---
-if "mensajes" not in st.session_state:
-    st.session_state.mensajes = []
+    # Selector de chat
+    chat_seleccionado = st.selectbox("Selecciona un chat:", list(st.session_state.mis_chats.keys()), index=list(st.session_state.mis_chats.keys()).index(st.session_state.chat_actual))
+    if chat_seleccionado != st.session_state.chat_actual:
+        st.session_state.chat_actual = chat_seleccionado
+        st.rerun()
 
-for msg in st.session_state.mensajes:
+    st.divider()
+
+    st.header("⚙️ Configuración de IA")
+    proveedor = st.selectbox(
+        "Elige el cerebro de Arquímedes:",
+        ["Google (Gemini)", "OpenRouter (Llama 3)", "Mistral AI", "Groq", "Hugging Face"]
+    )
+    
+    st.subheader("🧠 Memoria")
+    memoria_actual = cargar_memoria()
+    for regla in memoria_actual["reglas"]:
+        st.write(f"- {regla}")
+
+# --- ARCHIVOS Y DESCARGAS ---
+with st.expander("📂 Subir archivos o imágenes (Opcional)"):
+    archivo_subido = st.file_uploader("Sube un archivo de texto o imagen", type=["txt", "png", "jpg", "jpeg"])
+
+# --- MOSTRAR HISTORIAL DEL CHAT ACTUAL ---
+mensajes_actuales = st.session_state.mis_chats[st.session_state.chat_actual]
+
+for i, msg in enumerate(mensajes_actuales):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        # Botón de descarga para respuestas del asistente
+        if msg["role"] == "assistant":
+            st.download_button(
+                label="⬇️ Descargar respuesta",
+                data=msg["content"],
+                file_name=f"respuesta_arquimedes_{i}.txt",
+                mime="text/plain",
+                key=f"descarga_{i}"
+            )
 
-reglas_aprendidas = "\n".join(memoria_actual["reglas"])
-
-instrucciones = f"""
-Eres Arquímedes, el director y arquitecto de una casa de bots.
-Tu función es coordinar a otros bots para crear videos educativos.
-El usuario (Botman) no sabe de programación, háblale en español sencillo.
-
-REGLAS QUE HAS APRENDIDO:
-{reglas_aprendidas}
-
-INSTRUCCIÓN DE APRENDIZAJE:
-Si Botman te da una orden permanente o te pide recordar algo para el futuro, DEBES añadir al final de tu respuesta EXACTAMENTE este formato:
-[MEMORIA: <aquí va la regla a recordar>]
-"""
+# --- LÓGICA DEL CHAT ---
+instrucciones = f"Eres Arquímedes. Habla claro y en español.\nREGLAS:\n" + "\n".join(memoria_actual["reglas"]) + "\nSi debes recordar algo, usa: [MEMORIA: <regla>]"
 
 if prompt := st.chat_input("Escríbele una orden a Arquímedes..."):
+    # Procesar archivo si existe
+    texto_archivo = ""
+    if archivo_subido:
+        if archivo_subido.type == "text/plain":
+            texto_archivo = archivo_subido.read().decode("utf-8")
+            prompt = f"[El usuario adjuntó un archivo con este texto: {texto_archivo}]\n\n{prompt}"
+    
+    # Mostrar mensaje del usuario
     with st.chat_message("user"):
         st.markdown(prompt)
     
-    st.session_state.mensajes.append({"role": "user", "content": prompt})
+    mensajes_actuales.append({"role": "user", "content": prompt})
     
-    contents = []
-    for m in st.session_state.mensajes:
-        role = "user" if m["role"] == "user" else "model"
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m["content"])]))
-    
-    mensajes_openai = [{"role": "system", "content": instrucciones}]
-    for m in st.session_state.mensajes:
-        role_or = "assistant" if m["role"] == "model" else m["role"]
-        mensajes_openai.append({"role": role_or, "content": m["content"]})
-
     texto_respuesta = ""
-    
-    # --- CASCADA DE RESPALDOS SEGURA ---
-    with st.spinner("Arquímedes está pensando..."):
-        # 1. Gemini Principal
-        if google_client:
-            try:
-                response = google_client.models.generate_content(
-                    model=modelo_principal, contents=contents,
-                    config=types.GenerateContentConfig(system_instruction=instrucciones)
-                )
-                texto_respuesta = response.text
-            except Exception:
-                # 2. Gemini Respaldo
+    error_real = ""
+
+    with st.spinner(f"Arquímedes está pensando con {proveedor}..."):
+        try:
+            # 1. GOOGLE GEMINI
+            if proveedor == "Google (Gemini)" and google_client:
+                contents = []
+                for m in mensajes_actuales:
+                    role = "user" if m["role"] == "user" else "model"
+                    contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m["content"])]))
                 try:
-                    response = google_client.models.generate_content(
-                        model=modelo_respaldo, contents=contents,
-                        config=types.GenerateContentConfig(system_instruction=instrucciones)
-                    )
-                    texto_respuesta = response.text
+                    res = google_client.models.generate_content(model="gemini-3.8-flash", contents=contents, config=types.GenerateContentConfig(system_instruction=instrucciones))
+                    texto_respuesta = res.text
                 except Exception:
-                    pass
+                    res = google_client.models.generate_content(model="gemini-1.5-flash", contents=contents, config=types.GenerateContentConfig(system_instruction=instrucciones))
+                    texto_respuesta = res.text
+            
+            # 2. OPENROUTER
+            elif proveedor == "OpenRouter (Llama 3)" and openrouter_client:
+                msgs = [{"role": "system", "content": instrucciones}] + [{"role": "assistant" if m["role"]=="model" else m["role"], "content": m["content"]} for m in mensajes_actuales]
+                res = openrouter_client.chat.completions.create(model="meta-llama/llama-3-8b-instruct:free", messages=msgs)
+                texto_respuesta = res.choices[0].message.content
 
-        # 3. OpenRouter
-        if not texto_respuesta and openrouter_client:
-            st.warning("Google falló. Probando OpenRouter...")
-            try:
-                response_or = openrouter_client.chat.completions.create(
-                    model="meta-llama/llama-3-8b-instruct:free",
-                    messages=mensajes_openai
-                )
-                texto_respuesta = response_or.choices[0].message.content
-            except Exception:
-                pass
+            # 3. MISTRAL
+            elif proveedor == "Mistral AI" and mistral_client:
+                msgs = [{"role": "system", "content": instrucciones}] + [{"role": "assistant" if m["role"]=="model" else m["role"], "content": m["content"]} for m in mensajes_actuales]
+                res = mistral_client.chat.completions.create(model="open-mistral-7b", messages=msgs)
+                texto_respuesta = res.choices[0].message.content
 
-        # 4. Mistral
-        if not texto_respuesta and mistral_client:
-            st.warning("OpenRouter falló. Probando Mistral...")
-            try:
-                response_mistral = mistral_client.chat.completions.create(
-                    model="open-mistral-7b",
-                    messages=mensajes_openai
-                )
-                texto_respuesta = response_mistral.choices[0].message.content
-            except Exception:
-                pass
+            # 4. GROQ
+            elif proveedor == "Groq" and groq_client:
+                msgs = [{"role": "system", "content": instrucciones}] + [{"role": "assistant" if m["role"]=="model" else m["role"], "content": m["content"]} for m in mensajes_actuales]
+                res = groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=msgs)
+                texto_respuesta = res.choices[0].message.content
 
-        # 5. Groq
-        if not texto_respuesta and groq_client:
-            st.warning("Mistral falló. Probando Groq...")
-            try:
-                response_groq = groq_client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
-                    messages=mensajes_openai
-                )
-                texto_respuesta = response_groq.choices[0].message.content
-            except Exception:
-                pass
+            # 5. HUGGING FACE
+            elif proveedor == "Hugging Face" and hf_client:
+                msgs = [{"role": "system", "content": instrucciones}] + [{"role": "assistant" if m["role"]=="model" else m["role"], "content": m["content"]} for m in mensajes_actuales]
+                res = hf_client.chat.completions.create(model="meta-llama/Meta-Llama-3-8B-Instruct", messages=msgs)
+                texto_respuesta = res.choices[0].message.content
 
-        # 6. Hugging Face
-        if not texto_respuesta and hf_client:
-            st.warning("Groq falló. Probando Hugging Face...")
-            try:
-                response_hf = hf_client.chat.completions.create(
-                    model="meta-llama/Meta-Llama-3-8B-Instruct",
-                    messages=mensajes_openai,
-                    max_tokens=500
-                )
-                texto_respuesta = response_hf.choices[0].message.content
-            except Exception as e:
-                pass
+            else:
+                error_real = "No se seleccionó un modelo válido o falta la llave API en los Secretos."
 
-        # Si todo falló
-        if not texto_respuesta:
-            texto_respuesta = "Lo siento, Botman. Todos mis cerebros están desconectados o no configuraste las llaves correctamente."
+        except Exception as e:
+            error_real = str(e)
 
-    # --- PROCESAMIENTO DE RESPUESTA Y MEMORIA ---
+    # --- MOSTRAR RESPUESTA O ERROR REAL ---
     if texto_respuesta:
+        # Procesar memoria
         match = re.search(r"\[MEMORIA:\s*(.*?)\]", texto_respuesta)
         if match:
-            nueva_regla = match.group(1)
-            guardar_memoria(nueva_regla)
+            guardar_memoria(match.group(1))
             texto_respuesta = re.sub(r"\[MEMORIA:\s*.*?\]", "", texto_respuesta).strip()
-            st.toast(f"🧠 ¡Arquímedes ha aprendido: '{nueva_regla}'!")
+            st.toast("🧠 ¡Arquímedes ha aprendido algo nuevo!")
         
         with st.chat_message("assistant"):
             st.markdown(texto_respuesta)
-        st.session_state.mensajes.append({"role": "assistant", "content": texto_respuesta})
+        mensajes_actuales.append({"role": "assistant", "content": texto_respuesta})
+        st.rerun()
+    else:
+        # Si falló, mostramos exactamente qué llave falló
+        st.error(f"❌ Error con {proveedor}. Detalle: {error_real}")
+        st.info("💡 Revisa que la llave de este proveedor esté bien escrita en los Secrets de Streamlit y que hayas reiniciado la app.")
