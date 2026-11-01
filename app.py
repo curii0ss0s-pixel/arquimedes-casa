@@ -1,18 +1,26 @@
 import streamlit as st
 from google import genai
 from google.genai import types
+from openai import OpenAI
 import json
 import os
 import re
 
-# --- 1. CONFIGURACIÓN DEL CLIENTE ---
-api_key = st.secrets["GEMINI_API_KEY"].strip().replace('"', '').replace("'", "")
+# --- 1. CONFIGURACIÓN DE CLIENTES ---
+# Limpiamos las llaves
+api_key_google = st.secrets["GEMINI_API_KEY"].strip().replace('"', '').replace("'", "")
+api_key_openrouter = st.secrets["OPENROUTER_API_KEY"].strip().replace('"', '').replace("'", "")
 
 @st.cache_resource
-def get_client():
-    return genai.Client(api_key=api_key)
+def get_google_client():
+    return genai.Client(api_key=api_key_google)
 
-client = get_client()
+@st.cache_resource
+def get_openrouter_client():
+    return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key_openrouter)
+
+google_client = get_google_client()
+openrouter_client = get_openrouter_client()
 
 # --- 2. SISTEMA DE MEMORIA (APRENDIZAJE) ---
 MEMORY_FILE = "memoria_arquimedes.json"
@@ -28,7 +36,6 @@ def cargar_memoria():
         }
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(memoria_inicial, f, ensure_ascii=False, indent=4)
-    
     with open(MEMORY_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -42,15 +49,13 @@ def guardar_memoria(nueva_regla):
 # --- 3. INTERFAZ GRÁFICA ---
 st.title("🏛️ La Casa de Arquímedes")
 
-# Menú lateral
 st.sidebar.header("⚙️ Configuración")
 modelo_principal = st.sidebar.selectbox(
-    "Modelo de IA:",
+    "Modelo de IA Principal:",
     ["gemini-3.8-flash", "gemini-1.5-flash"]
 )
 modelo_respaldo = "gemini-1.5-flash" if modelo_principal == "gemini-3.8-flash" else "gemini-3.8-flash"
 
-# Mostrar lo que ha aprendido en la barra lateral
 memoria_actual = cargar_memoria()
 st.sidebar.subheader("🧠 Memoria de Arquímedes")
 for regla in memoria_actual["reglas"]:
@@ -60,12 +65,10 @@ for regla in memoria_actual["reglas"]:
 if "mensajes" not in st.session_state:
     st.session_state.mensajes = []
 
-# Mostrar historial
 for msg in st.session_state.mensajes:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Instrucciones dinámicas (se actualizan cada vez que hablas)
 reglas_aprendidas = "\n".join(memoria_actual["reglas"])
 
 instrucciones = f"""
@@ -77,7 +80,7 @@ REGLAS QUE HAS APRENDIDO:
 {reglas_aprendidas}
 
 INSTRUCCIÓN DE APRENDIZAJE:
-Si Botman te da una orden permanente o te pide recordar algo para el futuro (ej. "A partir de ahora...", "Recuerda que..."), DEBES añadir al final de tu respuesta EXACTAMENTE este formato:
+Si Botman te da una orden permanente o te pide recordar algo para el futuro, DEBES añadir al final de tu respuesta EXACTAMENTE este formato:
 [MEMORIA: <aquí va la regla a recordar>]
 """
 
@@ -92,36 +95,57 @@ if prompt := st.chat_input("Escríbele una orden a Arquímedes..."):
         role = "user" if m["role"] == "user" else "model"
         contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m["content"])]))
     
+    texto_respuesta = ""
+    
+    # --- SISTEMA DE TRIPLE RESPALDO ---
     try:
-        with st.spinner(f"Arquímedes está procesando..."):
+        with st.spinner(f"Arquímedes está pensando (usando {modelo_principal})..."):
             try:
-                response = client.models.generate_content(
+                # Intento 1: Modelo principal de Google
+                response = google_client.models.generate_content(
                     model=modelo_principal,
                     contents=contents,
                     config=types.GenerateContentConfig(system_instruction=instrucciones)
                 )
+                texto_respuesta = response.text
             except Exception:
-                response = client.models.generate_content(
+                # Intento 2: Modelo de respaldo de Google
+                st.info(f"El modelo {modelo_principal} falló. Saltando a {modelo_respaldo}...")
+                response = google_client.models.generate_content(
                     model=modelo_respaldo,
                     contents=contents,
                     config=types.GenerateContentConfig(system_instruction=instrucciones)
                 )
+                texto_respuesta = response.text
+
+    except Exception:
+        # Intento 3: Si Google falla por completo, usamos OpenRouter (Llama 3)
+        st.warning("Los servidores de Google están caídos. Saltando al Plan C (OpenRouter - Llama 3)...")
+        try:
+            # Adaptamos el historial al formato de OpenRouter
+            mensajes_openrouter = [{"role": "system", "content": instrucciones}]
+            for m in st.session_state.mensajes:
+                role_or = "assistant" if m["role"] == "model" else m["role"]
+                mensajes_openrouter.append({"role": role_or, "content": m["content"]})
             
-            texto_respuesta = response.text
-            
-            # --- 5. DETECCIÓN DE APRENDIZAJE ---
-            # Buscamos si Arquímedes usó la etiqueta [MEMORIA: ...]
-            match = re.search(r"\[MEMORIA:\s*(.*?)\]", texto_respuesta)
-            if match:
-                nueva_regla = match.group(1)
-                guardar_memoria(nueva_regla)
-                # Le quitamos la etiqueta al texto para que se vea limpio
-                texto_respuesta = re.sub(r"\[MEMORIA:\s*.*?\]", "", texto_respuesta).strip()
-                st.toast(f"🧠 ¡Arquímedes ha aprendido: '{nueva_regla}'!")
-            
-            with st.chat_message("assistant"):
-                st.markdown(texto_respuesta)
-            st.session_state.mensajes.append({"role": "assistant", "content": texto_respuesta})
-            
-    except Exception as e:
-        st.error(f"Ups, ambos modelos fallaron. Detalle: {e}")
+            response_or = openrouter_client.chat.completions.create(
+                model="meta-llama/llama-3-8b-instruct:free", # Modelo gratuito de Meta
+                messages=mensajes_openrouter
+            )
+            texto_respuesta = response_or.choices[0].message.content
+        except Exception as e:
+            st.error(f"Todos los modelos fallaron, incluso los externos. Detalle: {e}")
+            texto_respuesta = "Lo siento, Botman. Todos mis cerebros están desconectados en este momento."
+
+    # --- PROCESAMIENTO DE RESPUESTA Y MEMORIA ---
+    if texto_respuesta:
+        match = re.search(r"\[MEMORIA:\s*(.*?)\]", texto_respuesta)
+        if match:
+            nueva_regla = match.group(1)
+            guardar_memoria(nueva_regla)
+            texto_respuesta = re.sub(r"\[MEMORIA:\s*.*?\]", "", texto_respuesta).strip()
+            st.toast(f"🧠 ¡Arquímedes ha aprendido: '{nueva_regla}'!")
+        
+        with st.chat_message("assistant"):
+            st.markdown(texto_respuesta)
+        st.session_state.mensajes.append({"role": "assistant", "content": texto_respuesta})
