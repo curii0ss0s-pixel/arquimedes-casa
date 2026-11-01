@@ -7,22 +7,36 @@ import os
 import re
 
 # --- 1. CONFIGURACIÓN DE CLIENTES ---
-# Limpiamos las llaves
-api_key_google = st.secrets["GEMINI_API_KEY"].strip().replace('"', '').replace("'", "")
-api_key_openrouter = st.secrets["OPENROUTER_API_KEY"].strip().replace('"', '').replace("'", "")
+def get_secret(key):
+    return st.secrets.get(key, "").strip().replace('"', '').replace("'", "")
 
 @st.cache_resource
 def get_google_client():
-    return genai.Client(api_key=api_key_google)
+    return genai.Client(api_key=get_secret("GEMINI_API_KEY"))
 
 @st.cache_resource
 def get_openrouter_client():
-    return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key_openrouter)
+    return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=get_secret("OPENROUTER_API_KEY"))
+
+@st.cache_resource
+def get_groq_client():
+    return OpenAI(base_url="https://api.groq.com/openai/v1", api_key=get_secret("GROQ_API_KEY"))
+
+@st.cache_resource
+def get_mistral_client():
+    return OpenAI(base_url="https://api.mistral.ai/v1", api_key=get_secret("MISTRAL_API_KEY"))
+
+@st.cache_resource
+def get_huggingface_client():
+    return OpenAI(base_url="https://api-inference.huggingface.co/v1", api_key=get_secret("HUGGINGFACE_API_KEY"))
 
 google_client = get_google_client()
 openrouter_client = get_openrouter_client()
+groq_client = get_groq_client()
+mistral_client = get_mistral_client()
+hf_client = get_huggingface_client()
 
-# --- 2. SISTEMA DE MEMORIA (APRENDIZAJE) ---
+# --- 2. SISTEMA DE MEMORIA ---
 MEMORY_FILE = "memoria_arquimedes.json"
 
 def cargar_memoria():
@@ -95,47 +109,72 @@ if prompt := st.chat_input("Escríbele una orden a Arquímedes..."):
         role = "user" if m["role"] == "user" else "model"
         contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m["content"])]))
     
+    # Preparamos el historial en formato OpenAI
+    mensajes_openai = [{"role": "system", "content": instrucciones}]
+    for m in st.session_state.mensajes:
+        role_or = "assistant" if m["role"] == "model" else m["role"]
+        mensajes_openai.append({"role": role_or, "content": m["content"]})
+
     texto_respuesta = ""
     
-    # --- SISTEMA DE TRIPLE RESPALDO ---
-    try:
-        with st.spinner(f"Arquímedes está pensando (usando {modelo_principal})..."):
+    # --- CASCADA DE RESPALDOS ---
+    with st.spinner("Arquímedes está pensando..."):
+        # 1. Gemini Principal
+        try:
+            response = google_client.models.generate_content(
+                model=modelo_principal, contents=contents,
+                config=types.GenerateContentConfig(system_instruction=instrucciones)
+            )
+            texto_respuesta = response.text
+        except Exception:
+            # 2. Gemini Respaldo
+            st.info(f"El modelo {modelo_principal} falló. Saltando a {modelo_respaldo}...")
             try:
-                # Intento 1: Modelo principal de Google
                 response = google_client.models.generate_content(
-                    model=modelo_principal,
-                    contents=contents,
+                    model=modelo_respaldo, contents=contents,
                     config=types.GenerateContentConfig(system_instruction=instrucciones)
                 )
                 texto_respuesta = response.text
             except Exception:
-                # Intento 2: Modelo de respaldo de Google
-                st.info(f"El modelo {modelo_principal} falló. Saltando a {modelo_respaldo}...")
-                response = google_client.models.generate_content(
-                    model=modelo_respaldo,
-                    contents=contents,
-                    config=types.GenerateContentConfig(system_instruction=instrucciones)
-                )
-                texto_respuesta = response.text
-
-    except Exception:
-        # Intento 3: Si Google falla por completo, usamos OpenRouter (Llama 3)
-        st.warning("Los servidores de Google están caídos. Saltando al Plan C (OpenRouter - Llama 3)...")
-        try:
-            # Adaptamos el historial al formato de OpenRouter
-            mensajes_openrouter = [{"role": "system", "content": instrucciones}]
-            for m in st.session_state.mensajes:
-                role_or = "assistant" if m["role"] == "model" else m["role"]
-                mensajes_openrouter.append({"role": role_or, "content": m["content"]})
-            
-            response_or = openrouter_client.chat.completions.create(
-                model="meta-llama/llama-3-8b-instruct:free", # Modelo gratuito de Meta
-                messages=mensajes_openrouter
-            )
-            texto_respuesta = response_or.choices[0].message.content
-        except Exception as e:
-            st.error(f"Todos los modelos fallaron, incluso los externos. Detalle: {e}")
-            texto_respuesta = "Lo siento, Botman. Todos mis cerebros están desconectados en este momento."
+                # 3. OpenRouter (Llama 3)
+                st.warning("Google falló. Probando OpenRouter...")
+                try:
+                    response_or = openrouter_client.chat.completions.create(
+                        model="meta-llama/llama-3-8b-instruct:free",
+                        messages=mensajes_openai
+                    )
+                    texto_respuesta = response_or.choices[0].message.content
+                except Exception:
+                    # 4. Mistral AI
+                    st.warning("OpenRouter falló. Probando Mistral AI...")
+                    try:
+                        response_mistral = mistral_client.chat.completions.create(
+                            model="open-mistral-7b", # Modelo abierto y gratuito de Mistral
+                            messages=mensajes_openai
+                        )
+                        texto_respuesta = response_mistral.choices[0].message.content
+                    except Exception:
+                        # 5. Groq (Llama 3)
+                        st.warning("Mistral falló. Probando Groq...")
+                        try:
+                            response_groq = groq_client.chat.completions.create(
+                                model="llama-3.1-8b-instant",
+                                messages=mensajes_openai
+                            )
+                            texto_respuesta = response_groq.choices[0].message.content
+                        except Exception:
+                            # 6. Hugging Face
+                            st.warning("Groq falló. Probando Hugging Face...")
+                            try:
+                                response_hf = hf_client.chat.completions.create(
+                                    model="meta-llama/Meta-Llama-3-8B-Instruct",
+                                    messages=mensajes_openai,
+                                    max_tokens=500
+                                )
+                                texto_respuesta = response_hf.choices[0].message.content
+                            except Exception as e:
+                                st.error(f"Todos los cerebros fallaron. Detalle: {e}")
+                                texto_respuesta = "Lo siento, Botman. Mis cerebros están desconectados en este momento."
 
     # --- PROCESAMIENTO DE RESPUESTA Y MEMORIA ---
     if texto_respuesta:
